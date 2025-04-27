@@ -1,0 +1,8 @@
+{
+  "editor.defaultFormatter": "GitHub.copilot",
+  "editor.formatOnSave": true,
+"C_Cpp.formatting": "clangFormat",
+"[c]": {
+    "editor.defaultFormatter": "ms-vscode.cpptools"
+}
+}
