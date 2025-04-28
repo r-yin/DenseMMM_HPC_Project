@@ -4,5 +4,8 @@
 "C_Cpp.formatting": "clangFormat",
 "[c]": {
     "editor.defaultFormatter": "ms-vscode.cpptools"
+},
+"files.associations": {
+    "stdlib.h": "c"
 }
 }
