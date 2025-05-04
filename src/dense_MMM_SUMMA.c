@@ -1,11 +1,12 @@
 /***********************************************************************
 
   mpicc -O2 -o dense_MMM_SUMMA dense_MMM_SUMMA.c
- ./dense_MMM_SUMMA
+  mpirun -np 16 ./dense_MMM_SUMMA 4 4 1
 
 */
 #include <assert.h>
 #include <mpi.h>
+#include <omp.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -15,7 +16,14 @@ typedef float data_t;
 #define A 4
 #define B 32
 #define C 400
-#define NUM_TESTS 40
+#define NUM_TESTS 50
+
+// 3 x (Tile size x Tile size) x sizeof(data_t) <= Cache_size * 0.8
+// 0.8 to avoid evictions from other associated code
+// #define T 40 // fit in L1
+// #define T 246 // fit in L2
+#define T 1250          // fit in L3
+static int use_omp = 1; // default omp on
 
 // allocate float matrix
 static data_t* alloc_mat(int rows, int cols)
@@ -28,6 +36,8 @@ static data_t* alloc_mat(int rows, int cols)
 static void local_genmm(data_t* A_blk, data_t* B_blk, data_t* C_blk, int A_r,
                         int A_c, int B_c, int ld)
 {
+#pragma omp parallel for collapse(2) schedule(                                 \
+        static) if (use_omp)      // parallelize A_r * A_c number of operations
     for (int i = 0; i < A_r; ++i) // loop row
     {
         for (int k = 0; k < A_c; ++k) // loop col
@@ -39,6 +49,26 @@ static void local_genmm(data_t* A_blk, data_t* B_blk, data_t* C_blk, int A_r,
     }
 }
 
+static void local_genmm_blocking(data_t* A_blk, data_t* B_blk, data_t* C_blk,
+                                 int A_r, int A_c, int B_c, int ld)
+{
+#pragma omp parallel for collapse(2) schedule(static) if (use_omp)
+    for (int ii = 0; ii < A_r; ii += T)
+        for (int kk = 0; kk < A_c; kk += T)
+        {
+            int i_max = (ii + T > A_r ? A_r : ii + T);
+            int k_max = (kk + T > A_c ? A_c : kk + T);
+
+            for (int i = ii; i < i_max; ++i)
+                for (int k = kk; k < k_max; ++k) // loop col
+                {
+                    data_t a = A_blk[i * A_c + k];
+                    for (int j = 0; j < B_c; ++j)
+                        C_blk[i * ld + j] += a * B_blk[k * B_c + j];
+                }
+        }
+}
+
 int main(int argc, char** argv)
 {
     MPI_Init(&argc, &argv);
@@ -48,7 +78,7 @@ int main(int argc, char** argv)
     // size: n+1
     MPI_Comm_size(MPI_COMM_WORLD, &world_size);
 
-    if (argc != 3)
+    if (argc < 3 || argc > 4)
     {
         if (world_rank == 0) // so only 1 error message
             fprintf(stderr, "Usage: %s Pr Pc", argv[0]);
@@ -57,6 +87,8 @@ int main(int argc, char** argv)
     int Pr = atoi(argv[1]);
     int Pc = atoi(argv[2]);
     assert(Pr * Pc == world_size); // check to make sure total procs == size
+    if (argc == 4)
+        use_omp = atoi(argv[3]); // 1 -> enable, 0 -> off
 
     // making new row and column communicators
     int coord[2] = {world_rank / Pc, world_rank % Pc}; // [row, col]
@@ -102,8 +134,7 @@ int main(int argc, char** argv)
 
         if (world_rank == 0)
         {
-            // build A and B, making them all squares for simplicity - may
-            // change later?
+            // build A and B, making them all squares for simplicity
             data_t *A_full = alloc_mat(n, n), *B_full = alloc_mat(n, n);
             for (int i = 0; i < n; ++i)
                 for (int j = 0; j < n; ++j)
@@ -182,6 +213,7 @@ int main(int argc, char** argv)
                 memcpy(Bpanel, B_block, sizeof(data_t) * Br * Bc);
             MPI_Bcast(Bpanel, Br * Bc, MPI_FLOAT, k, col_comm);
             local_genmm(Apanel, Bpanel, C_block, Br, Bc, Bc, Bc);
+            // local_genmm_blocking(Apanel, Bpanel, C_block, Br, Bc, Bc, Bc);
         }
         MPI_Barrier(MPI_COMM_WORLD);
         double t1 = MPI_Wtime();
